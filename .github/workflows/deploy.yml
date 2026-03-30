@@ -21,19 +21,90 @@ jobs:
       - name: 📦 Install dependencies
         run: npm install
 
-      - name: 🔐 Setup SSH
-        shell: bash
+      - name: 🔐 Setup SSH with Debug
         run: |
-          mkdir -p $HOME/.ssh
-          echo "${{ secrets.EC2_SSH_KEY }}" > $HOME/.ssh/id_rsa
-          chmod 600 $HOME/.ssh/id_rsa
-          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> $HOME/.ssh/known_hosts
+          echo "=== Step 1: Creating SSH directory ==="
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          
+          echo "=== Step 2: Writing SSH key ==="
+          # Write the SSH key and check if it was written correctly
+          cat > ~/.ssh/id_rsa << 'EOF'
+          ${{ secrets.EC2_SSH_KEY }}
+          EOF
+          
+          # Verify the key file exists and has content
+          if [ -f ~/.ssh/id_rsa ]; then
+            echo "✓ SSH key file created"
+            echo "Key file size: $(wc -l < ~/.ssh/id_rsa) lines"
+            echo "First line of key:"
+            head -n 1 ~/.ssh/id_rsa
+            echo "Last line of key:"
+            tail -n 1 ~/.ssh/id_rsa
+          else
+            echo "✗ Failed to create SSH key file"
+            exit 1
+          fi
+          
+          echo "=== Step 3: Setting permissions ==="
+          chmod 600 ~/.ssh/id_rsa
+          echo "✓ Permissions set"
+          
+          echo "=== Step 4: Testing key format ==="
+          # Test if the key is a valid private key
+          if ssh-keygen -y -f ~/.ssh/id_rsa > /dev/null 2>&1; then
+            echo "✓ SSH key is valid"
+          else
+            echo "✗ SSH key is invalid or corrupted"
+            echo "Key validation error:"
+            ssh-keygen -y -f ~/.ssh/id_rsa 2>&1 || true
+            exit 1
+          fi
+          
+          echo "=== Step 5: Adding host to known_hosts ==="
+          # Add EC2 host to known hosts with verbose output
+          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts 2>&1
+          echo "✓ Host added to known_hosts"
+          
+          echo "=== Step 6: Testing SSH connection ==="
+          # Test SSH connection with verbose output
+          echo "Attempting SSH connection to ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}..."
+          ssh -v -o ConnectTimeout=10 ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }} "echo 'SSH connection successful'" 2>&1 || {
+            echo "✗ SSH connection failed with exit code: $?"
+            echo "=== Common issues to check: ==="
+            echo "1. Is the EC2 instance running?"
+            echo "2. Is the security group allowing SSH (port 22) from GitHub Actions IPs?"
+            echo "3. Is the SSH key correct in GitHub secrets?"
+            echo "4. Is the EC2_USERNAME correct? (ubuntu for Ubuntu, ec2-user for Amazon Linux)"
+            echo "5. Is the EC2_HOST the public IP or DNS?"
+            exit 1
+          }
+          
+          echo "=== SSH setup completed successfully ==="
 
       - name: 🚀 Deploy to EC2
         run: |
-          ssh -o StrictHostKeyChecking=no ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }} << 'EOF'
-            cd ~/node-backend || exit 1
-            git pull origin main
-            npm install
-            pm2 restart all
+          echo "=== Starting deployment ==="
+          ssh ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }} << 'EOF'
+            echo "Connected to EC2 instance"
+            echo "Current directory: $(pwd)"
+            echo "Checking if ~/node-backend exists..."
+            if [ -d ~/node-backend ]; then
+              echo "✓ Directory found"
+              cd ~/node-backend
+              echo "Current branch: $(git branch --show-current)"
+              echo "Pulling latest changes..."
+              git pull origin main
+              echo "Installing dependencies..."
+              npm install
+              echo "Restarting PM2 processes..."
+              pm2 restart all || pm2 start index.js --name "node-backend"
+              pm2 save
+              echo "Deployment completed successfully"
+            else
+              echo "✗ Directory ~/node-backend not found"
+              echo "Available directories in home:"
+              ls -la ~/
+              exit 1
+            fi
           EOF
